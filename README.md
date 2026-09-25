@@ -2,6 +2,14 @@
 
 `wardo` turns a complex prompt into a durable TypeScript workflow that can run Codex and Claude Code agents. It stores the plan, task state, events, attempt results and judge decisions in the workspace `.wardo` directory.
 
+Install the agent skill from the skills directory:
+
+```bash
+npx skills add banbox/wardo --skill wardo
+```
+
+Browse it at [skills.sh/banbox/wardo/wardo](https://skills.sh/banbox/wardo/wardo).
+
 ## Install and build
 
 ```bash
