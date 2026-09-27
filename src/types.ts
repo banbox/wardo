@@ -1,5 +1,5 @@
 export type ProviderName = "codex" | "claude";
-export type LlmProviderName = "openai" | "anthropic" | "openai-compatible";
+export type LlmProviderName = "openai" | "anthropic" | "openai-compatible" | "local";
 
 export type TaskStatus =
   | "pending"
@@ -52,7 +52,9 @@ export interface TaskResult {
   status: TaskStatus;
   text: string;
   structured?: unknown;
+  provider?: ProviderName;
   sessionId?: string;
+  checkpoint?: { provider: ProviderName; sessionId: string; seq?: number; updatedAt: string };
   usage?: Record<string, unknown>;
   error?: string;
   attempt: number;
@@ -104,6 +106,7 @@ export interface RetryPolicy {
 
 export interface ProviderConfig {
   type: LlmProviderName;
+  name?: string;
   apiKey?: string;
   baseUrl?: string;
   models?: string[];
@@ -116,6 +119,12 @@ export interface WardoConfig {
   providerConcurrency?: Partial<Record<ProviderName, number>>;
   retry: RetryPolicy;
   providers: Record<string, ProviderConfig>;
+  /** Provider names in configuration order. Older object configs derive this from object insertion order. */
+  providerOrder?: string[];
+  providerHealth?: {
+    cooldownMs: number;
+    probeProbability: number;
+  };
   modelPreferences: string[];
   agentDefaults: {
     codex?: { model?: string; sandboxMode?: string; approvalPolicy?: string };

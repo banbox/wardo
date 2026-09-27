@@ -7,6 +7,31 @@ import { detectAgentEnvironment } from "./environment.js";
 
 const args = process.argv.slice(2);
 const command = args[0];
+
+async function runForeground(task: (signal: AbortSignal) => Promise<void>): Promise<void> {
+  const controller = new AbortController();
+  let interrupts = 0;
+  const onInterrupt = () => {
+    interrupts += 1;
+    if (interrupts === 1) {
+      console.error("Wardo pausing at the next safe checkpoint; press Ctrl-C again to force exit.");
+      process.exitCode = 130;
+      controller.abort(new Error("Paused by SIGINT"));
+    } else {
+      process.exitCode = 130;
+      process.exit(130);
+    }
+  };
+  process.once("SIGINT", onInterrupt);
+  try {
+    await task(controller.signal);
+  } catch (error) {
+    if (!controller.signal.aborted) throw error;
+  } finally {
+    process.removeListener("SIGINT", onInterrupt);
+  }
+}
+
 if (command === "run") {
   const autoPlan = args.includes("--plan=auto") || args.includes("--plan") && args[args.indexOf("--plan") + 1] === "auto";
   const stream = !args.includes("--no-stream");
@@ -15,14 +40,12 @@ if (command === "run") {
     console.error("Usage: wardo run <prompt>");
     process.exitCode = 2;
   } else {
-    const controller = new AbortController();
-    process.once("SIGINT", () => controller.abort(new Error("Paused by SIGINT")));
-    await execute({ prompt, workspace: process.cwd(), resume: true, plan: autoPlan ? "auto" : "single", stream, signal: controller.signal });
+    await runForeground(async (signal) => {
+      await execute({ prompt, workspace: process.cwd(), resume: true, plan: autoPlan ? "auto" : "single", stream, signal });
+    });
   }
 } else if (command === "resume") {
   const prompt = await readFile(join(process.cwd(), ".wardo/prompt.md"), "utf8");
-  const controller = new AbortController();
-  process.once("SIGINT", () => controller.abort(new Error("Paused by SIGINT")));
   let plan: { objective?: string; tasks?: unknown[] } | undefined;
   try {
     plan = JSON.parse(await readFile(join(process.cwd(), ".wardo/plan.json"), "utf8")) as { objective?: string; tasks?: unknown[] };
@@ -30,9 +53,13 @@ if (command === "run") {
     plan = undefined;
   }
   if (Array.isArray(plan?.tasks)) {
-    await runWorkflow({ id: "resumed", objective: plan?.objective ?? prompt, tasks: plan.tasks as never[] }, { workspace: process.cwd(), resume: true, signal: controller.signal });
+    await runForeground(async (signal) => {
+      await runWorkflow({ id: "resumed", objective: plan?.objective ?? prompt, tasks: plan.tasks as never[] }, { workspace: process.cwd(), resume: true, signal });
+    });
   } else {
-    await execute({ prompt, workspace: process.cwd(), resume: true, signal: controller.signal });
+    await runForeground(async (signal) => {
+      await execute({ prompt, workspace: process.cwd(), resume: true, signal });
+    });
   }
 } else if (command === "status") {
   try {

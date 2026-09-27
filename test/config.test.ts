@@ -38,3 +38,25 @@ test("loads ~/.wardo style YAML and environment overrides", async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+test("loads ordered provider lists including local and named entries", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wardo-provider-list-"));
+  const file = join(dir, "config.yml");
+  await writeFile(file, [
+    "providers:",
+    "  - name: primary",
+    "    type: openai",
+    "    models: [gpt-test]",
+    "  - type: anthropic",
+    "    models: [claude-test]",
+    "  - type: local",
+    "    baseUrl: http://localhost:11434/v1",
+    "    models: [local-test]",
+  ].join("\n"));
+  const config = await loadConfig({ path: file, workspace: dir, env: {} });
+  assert.deepEqual(config.providerOrder, ["primary", "anthropic", "local"]);
+  assert.equal(config.providers.primary?.type, "openai");
+  assert.equal(config.providers.anthropic?.type, "anthropic");
+  assert.equal(config.providers.local?.type, "local");
+  await rm(dir, { recursive: true, force: true });
+});
+

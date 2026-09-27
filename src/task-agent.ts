@@ -30,14 +30,35 @@ export class TaskAgent {
 
   async execute(task: TaskSpec, runId: string, context: string, signal?: AbortSignal): Promise<TaskResult> {
     const maxAttempts = task.maxAttempts ?? this.options.config.retry.maxAttempts;
+    const previous = await this.options.store.readJson<TaskResult>(`tasks/${task.id}/state.json`);
+    const resumable = previous?.status !== undefined && ["paused", "partial", "retry_wait", "running"].includes(previous.status);
+    const attemptBase = resumable ? previous?.attempt ?? 0 : 0;
     let followUp = "";
-    let last: TaskResult = { status: "unknown", text: "", attempt: 0 };
+    const waitForRetry = async (delay: number | undefined): Promise<boolean> => {
+      if (delay === undefined) return true;
+      try {
+        await (this.options.sleepFn ?? sleep)(delay, signal);
+        return true;
+      } catch (error) {
+        if (!signal?.aborted) throw error;
+        return false;
+      }
+    };
+    let last: TaskResult = { status: "unknown", text: "", attempt: attemptBase };
     const providers = task.provider === "codex" || task.provider === "claude"
       ? [{ provider: task.provider, model: task.model }]
       : this.providerCandidates(task);
-    let providerIndex = 0;
+    let providerIndex = resumable && previous?.provider ? Math.max(0, providers.findIndex((item) => item.provider === previous.provider)) : 0;
     let continuation: { provider: "codex" | "claude"; session: Awaited<ReturnType<AgentAdapter["start"]>> } | undefined;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (resumable && previous?.provider && previous.sessionId) {
+      const saved = await this.options.store.readSession(previous.provider, previous.sessionId);
+      continuation = {
+        provider: previous.provider,
+        session: saved ?? { provider: previous.provider, sessionId: previous.sessionId, cwd: this.options.workspace },
+      };
+    }
+    for (let relativeAttempt = 1; relativeAttempt <= maxAttempts; relativeAttempt += 1) {
+      const attempt = attemptBase + relativeAttempt;
       const attemptId = `attempt-${String(attempt).padStart(4, "0")}`;
       const plan = providers[providerIndex] ?? { provider: "codex" as const };
       const provider = plan.provider;
@@ -53,37 +74,52 @@ export class TaskAgent {
       const model = task.model?.includes(":") ? task.model.split(":").slice(1).join(":") : task.model ?? plan.model;
       let start: Awaited<ReturnType<AgentAdapter["start"]>> | undefined;
       let text = "";
+      let lastSeq = 0;
       let error: unknown;
       try {
         const input = { prompt, cwd: this.options.workspace, ...(model ? { model } : {}), ...(signal ? { signal } : {}) };
         start = continuation?.provider === provider
           ? await adapter.resume(continuation.session, input)
           : await adapter.start(input);
-        await this.options.events.emit({ runId, taskId: task.id, attemptId, type: "session_started", provider, payload: { sessionId: start.sessionId } });
+        await this.options.store.saveSession(start);
+        await this.options.store.saveTaskState(task.id, { status: "running", text, attempt, provider, sessionId: start.sessionId });
+        lastSeq = (await this.options.events.emit({ runId, taskId: task.id, attemptId, type: "session_started", provider, payload: { sessionId: start.sessionId } })).seq;
         for await (const event of adapter.stream(start, { prompt, ...(model ? { model } : {}), ...(signal ? { signal } : {}) })) {
           if (event.text) text += event.text;
-          await this.options.events.emit(normalizeAgentEvent(event, runId, task.id, attemptId));
+          lastSeq = (await this.options.events.emit(normalizeAgentEvent(event, runId, task.id, attemptId))).seq;
+          await this.options.store.saveSession(start);
+          await this.options.store.saveTaskState(task.id, { status: "running", text, attempt, provider, sessionId: start.sessionId, checkpoint: { provider, sessionId: start.sessionId, seq: lastSeq, updatedAt: new Date().toISOString() } });
         }
         continuation = { provider, session: start };
       } catch (caught) {
         error = caught;
+        if (signal?.aborted && start) {
+          try { await adapter.cancel(start, "Paused by SIGINT"); } catch { /* stream is already closed */ }
+        }
+        if (start) await this.options.store.saveSession(start);
         await this.options.events.emit({ runId, taskId: task.id, attemptId, type: "error", provider, payload: { error: String(caught) } });
       }
       if (error) {
         if (signal?.aborted) {
-          last = { status: "paused", text, error: "Paused", attempt, ...(start?.sessionId ? { sessionId: start.sessionId } : {}) };
+          last = { status: "paused", text, error: "Paused", attempt, provider, ...(start?.sessionId ? { sessionId: start.sessionId, checkpoint: { provider, sessionId: start.sessionId, seq: lastSeq, updatedAt: new Date().toISOString() } } : {}) };
           await this.options.store.saveAttempt(task.id, attemptId, last, text);
+          if (last.checkpoint) await this.options.store.saveCheckpoint(task.id, attemptId, last.checkpoint);
           return last;
         }
         const classified = classifyError(error);
-        last = { status: classified.retryable ? "retry_wait" : "failed", text, error: classified.message, attempt, ...(start?.sessionId ? { sessionId: start.sessionId } : {}) };
-        if (!classified.retryable || attempt >= maxAttempts) {
+        last = { status: classified.retryable ? "retry_wait" : "failed", text, error: classified.message, attempt, provider, ...(start?.sessionId ? { sessionId: start.sessionId } : {}) };
+        if (!classified.retryable || relativeAttempt >= maxAttempts) {
           await this.options.store.saveAttempt(task.id, attemptId, last, text);
           return last;
         }
-        const delay = retryDelay(this.options.config.retry, attempt);
+        const delay = retryDelay(this.options.config.retry, relativeAttempt);
         await this.options.events.emit({ runId, taskId: task.id, attemptId, type: "retry_wait", provider, payload: { delayMs: delay, error: classified } });
-        if (delay !== undefined) await (this.options.sleepFn ?? sleep)(delay, signal);
+        if (!(await waitForRetry(delay))) {
+          last = { status: "paused", text, error: "Paused during retry wait", attempt, provider, ...(start?.sessionId ? { sessionId: start.sessionId, checkpoint: { provider, sessionId: start.sessionId, seq: lastSeq, updatedAt: new Date().toISOString() } } : {}) };
+          await this.options.store.saveAttempt(task.id, attemptId, last, text);
+          if (last.checkpoint) await this.options.store.saveCheckpoint(task.id, attemptId, last.checkpoint);
+          return last;
+        }
         providerIndex = Math.min(providerIndex + 1, providers.length - 1);
         continuation = undefined;
         continue;
@@ -108,22 +144,28 @@ export class TaskAgent {
         decision = judged.object as z.infer<typeof JudgeDecision>;
       } catch (caught) {
         if (signal?.aborted) {
-          last = { status: "paused", text, error: "Paused during judge", attempt, ...(start?.sessionId ? { sessionId: start.sessionId } : {}) };
+          last = { status: "paused", text, error: "Paused during judge", attempt, provider, ...(start?.sessionId ? { sessionId: start.sessionId, checkpoint: { provider, sessionId: start.sessionId, seq: lastSeq, updatedAt: new Date().toISOString() } } : {}) };
           await this.options.store.saveAttempt(task.id, attemptId, last, text);
+          if (last.checkpoint) await this.options.store.saveCheckpoint(task.id, attemptId, last.checkpoint);
           return last;
         }
         const classified = classifyError(caught);
-        last = { status: classified.retryable ? "retry_wait" : "failed", text, error: `Judge failed: ${classified.message}`, attempt, ...(start?.sessionId ? { sessionId: start.sessionId } : {}) };
+        last = { status: classified.retryable ? "retry_wait" : "failed", text, error: `Judge failed: ${classified.message}`, attempt, provider, ...(start?.sessionId ? { sessionId: start.sessionId } : {}) };
         await this.options.store.saveAttempt(task.id, attemptId, last, text);
-        if (!classified.retryable || attempt >= maxAttempts) return last;
-        const delay = retryDelay(this.options.config.retry, attempt);
-        if (delay !== undefined) await (this.options.sleepFn ?? sleep)(delay, signal);
+        if (!classified.retryable || relativeAttempt >= maxAttempts) return last;
+        const delay = retryDelay(this.options.config.retry, relativeAttempt);
+        if (!(await waitForRetry(delay))) {
+          last = { status: "paused", text, error: "Paused during judge retry wait", attempt, provider, ...(start?.sessionId ? { sessionId: start.sessionId, checkpoint: { provider, sessionId: start.sessionId, seq: lastSeq, updatedAt: new Date().toISOString() } } : {}) };
+          await this.options.store.saveAttempt(task.id, attemptId, last, text);
+          if (last.checkpoint) await this.options.store.saveCheckpoint(task.id, attemptId, last.checkpoint);
+          return last;
+        }
         providerIndex = Math.min(providerIndex + 1, providers.length - 1);
         continuation = undefined;
         continue;
       }
       await this.options.store.atomicWrite(`tasks/${task.id}/${attemptId}/judge.json`, decision);
-      last = { status: decision.verdict === "pass" ? "succeeded" : decision.verdict === "continue" ? "partial" : "failed", text, attempt, ...(start?.sessionId ? { sessionId: start.sessionId } : {}) };
+      last = { status: decision.verdict === "pass" ? "succeeded" : decision.verdict === "continue" ? "partial" : "failed", text, attempt, provider, ...(start?.sessionId ? { sessionId: start.sessionId } : {}) };
       await this.options.store.saveAttempt(task.id, attemptId, last, text);
       if (decision.verdict === "pass") return last;
       if (decision.verdict === "fail" && !decision.retryable) return last;

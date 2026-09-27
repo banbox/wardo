@@ -94,6 +94,26 @@ test("persists a paused task and leaves dependents for resume", async () => {
   await rm(workspace, { recursive: true, force: true });
 });
 
+test("resume requeues a paused task and keeps completed work skipped", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "wardo-pause-resume-"));
+  let calls = 0;
+  const fake = {
+    async execute(task: { id: string }): Promise<TaskResult> {
+      calls += 1;
+      return calls === 1
+        ? { status: "paused", text: "checkpoint", attempt: 1 }
+        : { status: "succeeded", text: `resumed-${task.id}`, attempt: 2 };
+    },
+  } as unknown as TaskAgent;
+  const workflow = defineWorkflow({ id: "pause-resume", objective: "pause-resume", tasks: [defineTask({ id: "one", goal: "one", acceptance: "one" })] });
+  const first = await new WorkflowRunner(workflow, fake, new WardoStore(workspace), defaultConfig()).run();
+  assert.equal(first.get("one")?.status, "paused");
+  const second = await new WorkflowRunner(workflow, fake, new WardoStore(workspace), defaultConfig()).run({ resume: true });
+  assert.equal(second.get("one")?.status, "succeeded");
+  assert.equal(calls, 2);
+  await rm(workspace, { recursive: true, force: true });
+});
+
 test("forks a durable run with a new id and parent reference", async () => {
   const source = await mkdtemp(join(tmpdir(), "wardo-fork-source-"));
   const destination = await mkdtemp(join(tmpdir(), "wardo-fork-destination-"));

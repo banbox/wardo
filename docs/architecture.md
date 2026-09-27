@@ -562,3 +562,32 @@ test/
 - AI SDK OpenAI provider：<https://ai-sdk.dev/providers/ai-sdk-providers/openai>
 - AI SDK Anthropic provider：<https://ai-sdk.dev/providers/ai-sdk-providers/anthropic>
 - 旧版参考代码位于迁移来源仓库；当前实现以本仓库的 `src/`、`skill/` 和测试为准。
+
+## 18. Wardo 前台输出与持久化控制器
+
+### 18.1 SDK 的输出与 hook 边界
+
+`@openai/codex-sdk` 的标准模式是 `thread.runStreamed()` 返回 JSONL 事件流，`AbortSignal` 用于中断 turn，`resumeThread(threadId)` 用于下一次运行恢复。它没有把 Codex CLI 终端输出直接交给父进程的 hook，因此终端显示应由 Wardo 的事件消费者负责。
+
+`@anthropic-ai/claude-agent-sdk` 的标准模式是 `query()` 返回 `AsyncIterable`，支持 `includePartialMessages`、`AbortController`、`resume`、`forkSession`，并提供 permission/hooks 回调。这些 hooks 用于工具授权、请求和会话生命周期，不是 Wardo 的终端重定向机制。Wardo 应持续消费两个 SDK 的事件流，统一写入 EventBus 与 stdout/stderr，并把脱敏后的事件保存到 `.wardo`。
+
+### 18.2 Wardo 输出覆盖 agent 输出
+
+外部 Codex/Claude Code 只负责接收一次指令并启动 `wardo`。长时间运行期间不再让外部 agent 轮询；Wardo CLI 自己作为前台进程，TTY 模式由唯一 renderer 写入 `process.stdout`/`process.stderr`，避免 SDK 文本与状态行交错；非 TTY 模式输出 JSONL 供 CI 收集。外部 agent 不应再次创建并行协调器。
+
+### 18.3 Ctrl-C、中断保存与重新生成
+
+`SIGINT` 处理器只触发 `AbortController`，不直接 `process.exit()`。流检测到 abort 后，Codex 使用 `AbortSignal`，Claude 使用 `interrupt()/close()`；随后写入 attempt result、最后事件序号、session ID 和 checkpoint，并将任务标记为 `paused` 或 `unknown`。这样不可逆工具调用不会被无条件重复执行。
+
+`wardo resume` 读取 `.wardo/state.json`、`plan.json`、session 和近期事件，再用 `resumeThread`/`resume` 继续可恢复 session；不能恢复时把 checkpoint 摘要传给同一 provider 启动新 turn。用户在中断后提交的新要求先写入 `.wardo/prompt.md` 或新的 revision script，由 planner 重新生成或继承脚本，经过 typecheck/DAG 检查后继续，不在仍运行的 SDK 回调里热替换模块。
+
+### 18.4 监测与 hook 原则
+
+- 每个任务只有一个异步消费者读取 SDK stream，避免 SDK 终端和 Wardo renderer 双重输出。
+- Codex 使用 `thread.runStreamed(..., { signal })`；Claude 使用 `abortController` 与 `Query.interrupt()/close()`；第二次 Ctrl-C 才作为强制退出兜底。
+- Claude hooks 用于 permission/tool 生命周期，不用于实现 workflow 暂停；持久化状态始终由 Wardo EventBus 和 `.wardo` 管理。
+- 新版本优先保持 AbortSignal、session resume 和单一 stdout renderer 这三个边界，保证中断后可审计、可恢复。
+
+### 18.5 Provider 列表与健康状态
+
+配置文件中的 `providers` 推荐使用 YAML list，列表顺序就是 fallback 顺序；每项 `type` 可为 `openai`、`anthropic` 或 `local`，可选 `name` 用于模型引用。旧的对象格式继续解析为对象插入顺序。临时网络、限流和服务端错误会在 `.wardo/provider-health.json` 中记录 `unavailableUntil`、失败次数和最近错误；冷却期间跳过 provider，并按 `providerHealth.probeProbability` 进行恢复探测，成功后清零。健康文件与 workflow 状态分开，避免复制 API key，同时允许多个长任务共享同一 provider 的暂时不可用结论。

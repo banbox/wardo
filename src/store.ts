@@ -1,6 +1,6 @@
 import { appendFile, mkdir, readFile, rename, writeFile, open, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { WardoEvent } from "./types.js";
+import type { AgentSession, WardoEvent } from "./types.js";
 
 export class WardoStore {
   readonly root: string;
@@ -57,6 +57,22 @@ export class WardoStore {
     const dir = join("tasks", taskId, attemptId);
     await this.atomicWrite(join(dir, "result.json"), result);
     if (output !== undefined) await this.atomicWrite(join(dir, "output.md"), output);
+  }
+
+  async saveCheckpoint(taskId: string, attemptId: string, checkpoint: object): Promise<void> {
+    await this.atomicWrite(join("tasks", taskId, attemptId, "checkpoint.json"), checkpoint);
+  }
+
+  async saveSession(session: AgentSession): Promise<void> {
+    await this.atomicWrite(join("sessions", `${session.provider}-${session.sessionId}.json`), {
+      schemaVersion: 1,
+      ...session,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  async readSession(provider: AgentSession["provider"], sessionId: string): Promise<AgentSession | undefined> {
+    return this.readJson<AgentSession>(join("sessions", `${provider}-${sessionId}.json`));
   }
 
   async lock(): Promise<() => Promise<void>> {

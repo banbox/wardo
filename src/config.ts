@@ -34,13 +34,18 @@ function asNumberArray(value: unknown): number[] {
 }
 
 function normalizeProvider(value: unknown): ProviderConfig {
-  const raw = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
-  const type = raw.type === "anthropic" || raw.type === "openai-compatible" ? raw.type : "openai";
+  const source = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const nestedType = ["openai", "anthropic", "local", "openai-compatible"].find((key) => source[key] && typeof source[key] === "object");
+  const raw = nestedType
+    ? { ...(source[nestedType] as Record<string, unknown>), type: nestedType }
+    : source;
+  const type = raw.type === "anthropic" || raw.type === "openai-compatible" || raw.type === "local" ? raw.type : "openai";
   const headers = raw.headers && typeof raw.headers === "object"
     ? Object.fromEntries(Object.entries(raw.headers).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
     : undefined;
   return {
     type,
+    ...(typeof raw.name === "string" && raw.name ? { name: raw.name } : {}),
     ...(typeof raw.apiKey === "string" && raw.apiKey ? { apiKey: raw.apiKey } : {}),
     ...(typeof raw.baseUrl === "string" && raw.baseUrl ? { baseUrl: raw.baseUrl } : {}),
     ...(asStringArray(raw.models).length ? { models: asStringArray(raw.models) } : {}),
@@ -70,6 +75,8 @@ export function defaultConfig(): WardoConfig {
       openai: { type: "openai" },
       anthropic: { type: "anthropic" },
     },
+    providerOrder: ["openai", "anthropic"],
+    providerHealth: { cooldownMs: 300_000, probeProbability: 0.1 },
     modelPreferences: [],
     agentDefaults: {},
   };
@@ -93,16 +100,41 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Wardo
   }
 
   const base = defaultConfig();
-  const rawProviders = fileConfig.providers && typeof fileConfig.providers === "object"
-    ? fileConfig.providers as Record<string, unknown>
-    : {};
+  const rawProviderValue = fileConfig.providers;
   const providers: Record<string, ProviderConfig> = {};
-  for (const [name, value] of Object.entries(rawProviders)) providers[name] = normalizeProvider(value);
-  for (const [name, type] of [["openai", "openai"], ["anthropic", "anthropic"]] as const) {
-    providers[name] = {
-      ...providers[name],
-      ...envProvider(env, name, type),
-    };
+  const providerOrder: string[] = [];
+  const listMode = Array.isArray(rawProviderValue);
+  if (listMode) {
+    rawProviderValue.forEach((value, index) => {
+      const normalized = normalizeProvider(value);
+      const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+      const requested = typeof raw.name === "string" && raw.name ? raw.name : undefined;
+      const baseName = requested ?? (normalized.type === "openai-compatible" ? "local" : normalized.type);
+      const name = providers[baseName] ? `${baseName}-${index + 1}` : baseName;
+      providers[name] = { ...normalized, ...(requested ? { name: requested } : {}) };
+      providerOrder.push(name);
+    });
+  } else if (rawProviderValue && typeof rawProviderValue === "object") {
+    for (const [name, value] of Object.entries(rawProviderValue as Record<string, unknown>)) {
+      providers[name] = normalizeProvider(value);
+      providerOrder.push(name);
+    }
+  }
+  if (listMode) {
+    for (const name of providerOrder) {
+      const current = providers[name];
+      if (current) providers[name] = { ...current, ...envProvider(env, name, current.type) };
+    }
+  } else {
+    for (const [name, type] of [["openai", "openai"], ["anthropic", "anthropic"]] as const) {
+      providers[name] = { ...providers[name], ...envProvider(env, name, type) };
+      if (!providerOrder.includes(name)) providerOrder.push(name);
+    }
+  }
+  if (env.WARDO_PROVIDER_LOCAL_API_KEY || env.LOCAL_LLM_API_KEY || env.WARDO_PROVIDER_LOCAL_BASE_URL || env.LOCAL_LLM_BASE_URL) {
+    const local = providers.local ?? { type: "local" as const };
+    providers.local = { ...local, ...envProvider(env, "local", "local") };
+    if (!providerOrder.includes("local")) providerOrder.push("local");
   }
 
   const retryRaw = fileConfig.retry && typeof fileConfig.retry === "object" ? fileConfig.retry as Record<string, unknown> : {};
@@ -111,6 +143,9 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Wardo
   const preferences = (env.WARDO_MODEL_PREFERENCES ?? asStringArray(fileConfig.modelPreferences).join(","))
     .split(",").map((x) => x.trim()).filter(Boolean);
   const workspace = options.workspace ? resolve(options.workspace) : typeof fileConfig.workspace === "string" ? resolve(fileConfig.workspace) : undefined;
+  const healthRaw = fileConfig.providerHealth && typeof fileConfig.providerHealth === "object" ? fileConfig.providerHealth as Record<string, unknown> : {};
+  const cooldownMs = Number(healthRaw.cooldownMs ?? base.providerHealth?.cooldownMs ?? 300_000);
+  const probeProbability = Number(healthRaw.probeProbability ?? base.providerHealth?.probeProbability ?? 0.1);
   return {
     workspace,
     maxConcurrency: Number.isFinite(maxConcurrency) && maxConcurrency > 0 ? Math.floor(maxConcurrency) : 3,
@@ -122,6 +157,11 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Wardo
       maxAttempts: Number(retryRaw.maxAttempts ?? base.retry.maxAttempts),
     },
     providers: Object.keys(providers).length ? providers : base.providers,
+    providerOrder: providerOrder.length ? providerOrder : [...(base.providerOrder ?? ["openai", "anthropic"])],
+    providerHealth: {
+      cooldownMs: Number.isFinite(cooldownMs) && cooldownMs >= 0 ? cooldownMs : 300_000,
+      probeProbability: Number.isFinite(probeProbability) ? Math.min(1, Math.max(0, probeProbability)) : 0.1,
+    },
     modelPreferences: preferences,
     agentDefaults: (fileConfig.agentDefaults && typeof fileConfig.agentDefaults === "object"
       ? fileConfig.agentDefaults as WardoConfig["agentDefaults"]

@@ -83,7 +83,14 @@ export class WorkflowRunner {
     const existing = options.resume ? await this.store.readJson<{ runId?: string }>("workflow.json") : undefined;
     const savedState = options.resume ? await this.store.readJson<Record<string, TaskResult>>("state.json") : undefined;
     const runId = options.runId ?? existing?.runId ?? randomUUID();
-    if (savedState) for (const [id, result] of Object.entries(savedState)) this.statuses.set(id, result);
+    if (savedState) {
+      for (const [id, result] of Object.entries(savedState)) {
+        // A resumed run requeues work that was interrupted or waiting for a retry.
+        // Successful and terminal results remain durable and are skipped.
+        if (["paused", "partial", "retry_wait", "running", "ready", "pending"].includes(result.status)) continue;
+        this.statuses.set(id, result);
+      }
+    }
     await this.store.init(this.workflow.objective);
     await this.store.atomicWrite("workflow.json", { runId, workflow: this.workflow, environment: this.environment, config: { maxConcurrency: options.maxConcurrency ?? this.workflow.maxConcurrency ?? this.config.maxConcurrency } });
     await this.store.atomicWrite("plan.json", { schemaVersion: 1, objective: this.workflow.objective, tasks: this.tasks });
@@ -97,6 +104,7 @@ export class WorkflowRunner {
     while (this.statuses.size < this.tasks.length || active.size) {
       for (const task of this.tasks) {
         if (this.statuses.has(task.id) || active.has(task.id)) continue;
+        if (options.signal?.aborted) break;
         if (blocked(task.id)) {
           const result: TaskResult = { status: "blocked", text: "A dependency failed", attempt: 0 };
           this.statuses.set(task.id, result);
@@ -112,10 +120,17 @@ export class WorkflowRunner {
           if (activeForProvider >= providerLimit) continue;
         }
         const context = (task.dependsOn ?? []).map((dep) => `${dep}: ${this.statuses.get(dep)?.text ?? ""}`).join("\n\n");
-        const promise = this.agent.execute(task, runId, context, options.signal).then((result) => ({ id: task.id, result }));
+        const running: TaskResult = { status: "running", text: "", attempt: 0 };
+        this.statuses.set(task.id, running);
+        await this.store.saveTaskState(task.id, running);
+        await this.store.atomicWrite("state.json", Object.fromEntries(this.statuses));
+        const promise = this.agent.execute(task, runId, context, options.signal)
+          .then((result) => ({ id: task.id, result }))
+          .catch((error) => ({ id: task.id, result: { status: options.signal?.aborted ? "paused" as const : "unknown" as const, text: "", error: String(error), attempt: 0 } }));
         active.set(task.id, promise);
       }
       if (!active.size) {
+        if (options.signal?.aborted) break;
         const unresolved = this.tasks.filter((task) => !this.statuses.has(task.id));
         if (unresolved.length) throw new Error(`Scheduler stalled; unresolved tasks: ${unresolved.map((task) => task.id).join(", ")}`);
         break;
@@ -165,8 +180,12 @@ export async function runWorkflow(workflow: WorkflowSpec, options: WorkflowRunOp
   const store = new WardoStore(workspace);
   const events = new EventBus(store);
   events.subscribe(consoleRenderer({ enabled: options.stream !== false }));
-  const openai = config.providers.openai;
-  const anthropic = config.providers.anthropic;
+  const firstProvider = (type: "openai" | "anthropic") => {
+    const name = config.providerOrder?.find((item) => config.providers[item]?.type === type) ?? type;
+    return config.providers[name];
+  };
+  const openai = firstProvider("openai");
+  const anthropic = firstProvider("anthropic");
   const claudeEnv = Object.fromEntries(Object.entries({
     ...process.env,
     ...(anthropic?.apiKey ? { ANTHROPIC_API_KEY: anthropic.apiKey } : {}),
@@ -187,7 +206,7 @@ export async function runWorkflow(workflow: WorkflowSpec, options: WorkflowRunOp
       env: claudeEnv,
     }),
   };
-  const registry = new LlmRegistry(config);
+  const registry = new LlmRegistry(config, workspace);
   const agent = new TaskAgent({ adapters, registry, config, store, events, workspace, activeProvider: environment.active });
   return new WorkflowRunner(workflow, agent, store, config, environment).run(options);
 }
@@ -195,7 +214,7 @@ export async function runWorkflow(workflow: WorkflowSpec, options: WorkflowRunOp
 export async function execute(options: ExecuteOptions): Promise<Map<string, TaskResult>> {
   const workspace = resolve(options.workspace ?? process.cwd());
   const config = options.config ?? await loadConfig({ workspace });
-  const registry = new LlmRegistry(config);
+  const registry = new LlmRegistry(config, workspace);
   const workflow = options.workflow ?? (options.plan === "auto"
     ? await planWorkflow(options.prompt, registry, options.signal)
     : defineWorkflow({

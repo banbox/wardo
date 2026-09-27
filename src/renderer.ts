@@ -21,8 +21,9 @@ export function consoleRenderer(options: RenderOptions = {}): (event: WardoEvent
       error.write(`[${event.taskId}] error: ${JSON.stringify(payload.error ?? payload)}\n`);
       return;
     }
-    if (["session_started", "awaiting_judge", "retry_wait"].includes(event.type)) {
-      output.write(`[${event.taskId}] ${event.type}\n`);
+    if (["session_started", "turn_started", "turn_completed", "awaiting_judge", "retry_wait", "tool_call", "file_change"].includes(event.type)) {
+      const rawType = typeof payload.rawType === "string" ? ` (${payload.rawType})` : "";
+      output.write(`[${event.taskId}] ${event.type}${rawType}\n`);
     }
   };
 }

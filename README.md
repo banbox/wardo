@@ -88,3 +88,26 @@ For a stable multi-step plan, use `defineWorkflow`, `defineTask`, and `runWorkfl
 The CLI supports `wardo run`, `wardo run --plan auto`, `wardo resume`, `wardo status`, `wardo env`, and `wardo fork <destination>`. Pressing `Ctrl-C` persists the current task as paused; `wardo resume` continues from the saved `.wardo` state.
 
 The current implementation includes planner-driven decomposition, a durable scheduler, provider adapters, judge requests, retry classification, event storage, resume loading, configuration loading and the `reviewScript` checkpoint helper. Interactive pause commands and automatic review triggers are the next implementation slice.
+
+### Provider 列表与故障切换
+
+`~/.wardo/config.yml` 的 `providers` 支持按顺序排列的列表。每一项可使用 `openai`、`anthropic` 或 `local`（OpenAI 兼容接口）类型；`name` 可选，用于在模型偏好中引用该项：
+
+```yaml
+providers:
+  - name: primary
+    type: openai
+    apiKey: ${OPENAI_API_KEY}
+    models: [gpt-5-mini]
+  - type: anthropic
+    apiKey: ${ANTHROPIC_API_KEY}
+    models: [claude-haiku-4-5]
+  - type: local
+    baseUrl: http://127.0.0.1:11434/v1
+    models: [local-fast]
+providerHealth:
+  cooldownMs: 300000
+  probeProbability: 0.1
+```
+
+Wardo 按列表顺序选择 provider。遇到网络、限流、503/5xx 等临时故障时，会把 provider 写入工作区 `.wardo/provider-health.json`，在冷却时间内跳过它，并以 `probeProbability` 的概率进行恢复探测；成功请求会清除该 provider 的故障状态。旧的对象格式仍兼容。

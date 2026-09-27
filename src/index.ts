@@ -5,6 +5,7 @@ export * from "./renderer.js";
 export * from "./retry.js";
 export * from "./store.js";
 export * from "./llm.js";
+export * from "./provider-health.js";
 export * from "./task-agent.js";
 export * from "./workflow.js";
 export * from "./planner.js";
