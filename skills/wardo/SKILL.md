@@ -1,65 +1,35 @@
 ---
 name: wardo
-description: Transform complex user requests into TypeScript workflows that orchestrate Codex and Claude Code agents with durable .wardo state.
+description: Turn complex requests into durable Node/TypeScript or Python workflows that orchestrate Codex and Claude Code agents.
 ---
 
-# wardo skill
+# Wardo
 
-Generate a TypeScript script using the `wardo` package. Do not generate Python.
+Use Wardo when a request benefits from several agent tasks, dependencies, retries, resumability, or an independent judge. Keep simple deterministic work in the host language and use one Wardo task for the agent work.
 
-Use one `execute({ prompt, workspace })` call for a simple task. For a complex task, use `defineWorkflow` and `defineTask` with explicit goals, acceptance criteria, dependencies, and a provider hint. Keep independent tasks independent so the scheduler can run up to the configured concurrency. Every task result is checked by a separate lightweight judge request and is persisted under `.wardo`.
+## Choose a runtime
 
-The script must:
+- Node.js 20+: `import { execute, defineTask, defineWorkflow } from "wardo"`.
+- Python 3.10+: `from wardo import execute, define_task, define_workflow`.
+- Python can run without installation when the checkout's `python` directory is on `PYTHONPATH`; `python -m wardo run [--plan auto] <prompt>` is the CLI form.
 
-- preserve the original user request and task acceptance criteria;
-- pass dependency results through summaries and artifact references;
-- use `resume: true` for long-running work;
-- avoid putting API keys in the script or `.wardo` files;
-- leave simple file discovery and deterministic data processing to TypeScript code;
-- request a Codex or Claude review when the workflow itself needs to change.
+The equivalent calls are `execute(prompt, workspace, resume, plan)` in Python and `execute({ prompt, workspace, resume, plan })` in TypeScript. For a DAG, define tasks with `id`, `goal`, `acceptance`, `dependsOn`/`depends_on`, and an optional `provider`; define the workflow with `objective`, `tasks`, `maxConcurrency`/`max_concurrency`, and `failFast`/`fail_fast`. Dependency results are passed as task context. Keep independent tasks independent so concurrency can be used.
 
-Provider keys and URLs are configured in `~/.wardo/config.yml` or environment variables. The generated script should not hard-code a provider secret.
+Every task is judged and its state is persisted in `.wardo`. Preserve the user's request and acceptance criteria, pass summaries or artifact references between tasks, use `resume: true` for work that may be interrupted, and keep provider secrets in `~/.wardo/config.yml` or environment variables.
 
-## Runtime bootstrap
+## Reusable runners
 
-The skill can be installed in either `~/.codex/skills/wardo` or `~/.claude/skills/wardo`. Before generating or running a script, identify the active host:
+Use the bundled helpers when you need a ready-to-run script or want to avoid repeating bootstrap code:
 
-- `WARDO_ACTIVE_AGENT=codex` means Codex is the current host;
-- `WARDO_ACTIVE_AGENT=claude` means Claude Code is the current host;
-- if the variable is absent, the runtime checks `CODEX_*` and `CLAUDE_CODE*` environment variables and the installed binaries.
-
-Pass the detected value to the generated script so automatic provider selection starts with the current host. An explicit task provider still takes precedence.
-
-The generated script must bootstrap the package before importing it. This supports a freshly created project and local development where the package has not been installed yet:
-
-```ts
-import { createRequire } from "node:module";
-import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
-
-const packageName = "wardo";
-const requireFromScript = createRequire(import.meta.url);
-try {
-  requireFromScript.resolve(packageName);
-} catch {
-  const source = process.env.WARDO_LOCAL_PATH ?? process.env.WARDO_PACKAGE ?? packageName;
-  if (source.startsWith("/") && !existsSync(resolve(source, "dist/index.js"))) {
-    execFileSync("npm", ["run", "build", "--prefix", source], { stdio: "inherit", env: process.env });
-  }
-  execFileSync("npm", ["install", "--no-save", source], {
-    cwd: process.cwd(),
-    stdio: "inherit",
-    env: process.env,
-  });
-}
-
-const { execute } = await import(packageName);
-await execute({
-  prompt: "用户目标",
-  workspace: process.cwd(),
-  resume: true,
-});
+```bash
+node skills/wardo/scripts/wardo-run.mjs --plan auto "拆解并完成这个复杂请求"
+python skills/wardo/scripts/wardo-run.py --plan auto "拆解并完成这个复杂请求"
 ```
 
-For local testing, set `WARDO_LOCAL_PATH=/data/wardo` (or the absolute path of this checkout). The bootstrap must use an absolute local path when the npm package has not been published. The `wardo install-skill` command installs this skill into every detected agent, or into a selected target with `--agent codex` or `--agent claude`.
+`wardo-run.mjs` exports `ensureWardoPackage`, `parseRunArgs`, and `runPrompt`; it honors `WARDO_LOCAL_PATH`/`WARDO_PACKAGE`, builds an unpublished local checkout when needed, and installs it with `npm --no-save`. The Python helper honors `WARDO_PYTHON_PATH` and adds the bundled runtime path. Copy a helper next to a generated script if the skill directory will not be present at runtime.
+
+## Host and provider selection
+
+Set `WARDO_ACTIVE_AGENT=codex` or `WARDO_ACTIVE_AGENT=claude` when the host is ambiguous. Otherwise Wardo checks the host environment and installed binaries. A task's explicit provider takes precedence. Do not hard-code API keys, provider URLs, or a host-specific agent choice in generated code.
+
+Use `wardo env` to inspect detection, `wardo status` to read `.wardo/state.json`, `wardo resume` to continue a run, `wardo fork <destination>` to copy a run, and `wardo install-skill [--agent codex|claude]` to install this skill.

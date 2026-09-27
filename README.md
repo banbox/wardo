@@ -1,8 +1,8 @@
 # wardo
 
-`wardo` turns a complex prompt into a durable TypeScript workflow that can run Codex and Claude Code agents. It stores the plan, task state, events, attempt results and judge decisions in the workspace `.wardo` directory.
+`wardo` turns a complex prompt into a durable workflow that can run Codex and Claude Code agents. Node/TypeScript and Python runtimes share the same task DAG, nested task tree, independent judge, retry policy and workspace `.wardo` state.
 
-Install the agent skill from the skills directory:
+The agent skill is maintained at [`skills/wardo/SKILL.md`](skills/wardo/SKILL.md) and can be installed from the skills directory:
 
 ```bash
 npx skills add banbox/wardo --skill wardo
@@ -18,7 +18,7 @@ npm run check
 npm run build
 ```
 
-Node.js 20 or newer is required. No Python runtime is used.
+Node.js 20 or newer is required for the TypeScript runtime. A Python 3.10+ runtime is also included under [`python/wardo`](python/wardo); it has no required third party dependencies and is suitable for machines without Node.js.
 
 Install the skill into the detected host with:
 
@@ -86,6 +86,22 @@ await execute({ prompt: "完成一个需要分析、实现和测试的复杂改�
 For a stable multi-step plan, use `defineWorkflow`, `defineTask`, and `runWorkflow` from the package. Use `reviewScript` at a checkpoint when the workflow script needs an agent review and update.
 
 The CLI supports `wardo run`, `wardo run --plan auto`, `wardo resume`, `wardo status`, `wardo env`, and `wardo fork <destination>`. Pressing `Ctrl-C` persists the current task as paused; `wardo resume` continues from the saved `.wardo` state.
+
+### Python runtime
+
+From this checkout, add `python` to `PYTHONPATH` (or install/copy that directory) and use the same call shape:
+
+```bash
+python -m wardo run --plan auto "decompose, implement and verify this change"
+```
+
+```python
+from wardo import execute, define_task, define_workflow, run_workflow
+
+result = execute(prompt="用户目标", workspace=".", resume=True)
+```
+
+Python provider configuration is read from the same `~/.wardo/config.yml`, `WARDO_*` variables and provider entries. OpenAI chat completions, OpenAI Responses and Anthropic Messages formats are supported; `requestFormat` can select a wire format explicitly. Python task adapters invoke installed `codex` or `claude` CLIs by default and can be replaced with a custom adapter.
 
 The current implementation includes planner-driven decomposition, a durable scheduler, provider adapters, judge requests, retry classification, event storage, resume loading, configuration loading and the `reviewScript` checkpoint helper. Interactive pause commands and automatic review triggers are the next implementation slice.
 

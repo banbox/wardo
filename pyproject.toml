@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wardo"
+version = "0.1.0"
+description = "Durable DAG/task-tree orchestration for Codex and Claude agents"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+wardo-python = "wardo:main"
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]

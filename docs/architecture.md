@@ -436,7 +436,7 @@ Event bus 至少提供三个订阅者：持久化 writer、终端 renderer 和 s
 
 ## 12. Skill 和仓库布局
 
-原 `skill/SKILL.md` 的 Python-first 规则需要改为 TypeScript-first，并明确以下行为：简单任务直接生成一个 `execute` 调用；复杂任务生成 `defineWorkflow`；不要用 Python 做文件扫描或控制流程；所有长任务启用 `.wardo`；任务验收使用 schema；脚本必须能 `resume`。
+原 `skills/wardo/SKILL.md` 的 Python-first 规则需要改为 TypeScript-first，并明确以下行为：简单任务直接生成一个 `execute` 调用；复杂任务生成 `defineWorkflow`；不要用 Python 做文件扫描或控制流程；所有长任务启用 `.wardo`；任务验收使用 schema；脚本必须能 `resume`。
 
 建议的新仓库布局：
 
@@ -468,7 +468,7 @@ src/
     schemas.ts
     recovery.ts
 cli/wardo.ts
-skill/SKILL.md
+skills/wardo/SKILL.md
 templates/workflow.ts
 docs/architecture-typescript.md
 test/
@@ -542,7 +542,7 @@ test/
 
 ### 阶段三：skill 与任务树
 
-将 `skill/SKILL.md` 改写为 TypeScript-first，提供 `defineWorkflow` 模板、auto planner、上下文摘要和多 agent renderer。
+将 `skills/wardo/SKILL.md` 改写为 TypeScript-first，提供 `defineWorkflow` 模板、auto planner、上下文摘要和多 agent renderer。
 
 ### 阶段四：审查和 fork
 
@@ -561,7 +561,7 @@ test/
 - Vercel AI SDK：<https://ai-sdk.dev/docs>
 - AI SDK OpenAI provider：<https://ai-sdk.dev/providers/ai-sdk-providers/openai>
 - AI SDK Anthropic provider：<https://ai-sdk.dev/providers/ai-sdk-providers/anthropic>
-- 旧版参考代码位于迁移来源仓库；当前实现以本仓库的 `src/`、`skill/` 和测试为准。
+- 旧版参考代码位于迁移来源仓库；当前实现以本仓库的 `src/`、`skills/wardo/` 和测试为准。
 
 ## 18. Wardo 前台输出与持久化控制器
 

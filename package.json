@@ -10,13 +10,14 @@
     "./config": "./dist/config.js",
     "./agents": "./dist/agents/index.js"
   },
-  "files": ["dist", "skill", "skills", "templates"],
+  "files": ["dist", "skills", "templates", "python", "pyproject.toml", "wardo.py"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "python-test": "python -m unittest discover -s test -p 'python_*test.py'"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "2.0.105",

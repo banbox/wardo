@@ -14,7 +14,7 @@ function packageRoot(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..");
 }
 
-export async function installSkill(agent?: AgentName, source = join(packageRoot(), "skill")): Promise<SkillInstallResult[]> {
+export async function installSkill(agent?: AgentName, source = join(packageRoot(), "skills", "wardo")): Promise<SkillInstallResult[]> {
   const environment = await detectAgentEnvironment();
   const targets: AgentName[] = agent
     ? [agent]
